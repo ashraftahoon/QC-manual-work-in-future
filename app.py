@@ -44,8 +44,11 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
-# Use a stable secret key to persist sessions across restarts
-app.secret_key = os.getenv('SECRET_KEY', 'smart-qa-platform-super-secret-key-12345')
+# Secret key must come from the environment - no hardcoded fallback (leaks the key into source control)
+app.secret_key = os.getenv('SECRET_KEY')
+if not app.secret_key:
+    logger.warning("SECRET_KEY not set - using a random key for this process. Sessions will not persist across restarts until SECRET_KEY is set.")
+    app.secret_key = os.urandom(24).hex()
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = False # Set to True in production with HTTPS
 CORS(app)  # allow all origins
@@ -53,8 +56,8 @@ CORS(app)  # allow all origins
 # Configuration
 DEFAULT_JIRA_URL = os.getenv('JIRA_URL', 'https://qeemascrum.atlassian.net')
 XRAY_CLOUD_BASE_URL = "https://xray.cloud.getxray.app"
-XRAY_CLIENT_ID = os.getenv('XRAY_CLIENT_ID', '3DD691D61824422AAFC685BF28345BB1')
-XRAY_CLIENT_SECRET = os.getenv('XRAY_CLIENT_SECRET', '67db40a621521094896a0b5839b917d27d461f5ab6b34b7b02041b87c2008896')
+XRAY_CLIENT_ID = os.getenv('XRAY_CLIENT_ID')
+XRAY_CLIENT_SECRET = os.getenv('XRAY_CLIENT_SECRET')
 MCB_SERVER_URL = os.getenv('MCB_SERVER_URL', 'http://localhost:5678')
 MOCK_MCB = os.getenv('MOCK_MCB', 'false').lower() == 'true'
 
@@ -66,7 +69,7 @@ PLAYWRIGHT_WORKDIR = os.getenv('PLAYWRIGHT_WORKDIR') or None
 MCP_SERVER_URL = "https://playwright-mcp-s8mf.onrender.com/sse"
 
 MCP_URL       = "https://playwright-mcp-s8mf.onrender.com/sse"
-MISTRAL_KEY   = "jb0XySiEnvm0r7R3HwSAWvp0aIi80K1v" #"dGA15ms96fjMa6vGmXO7veWlAKInqWVm"
+MISTRAL_KEY   = os.getenv('MISTRAL_API_KEY')
 MISTRAL_MODEL = "codestral-latest"
 
 MAX_TOOL_RESULT_CHARS = 3000   # truncate huge snapshots to save tokens
@@ -78,8 +81,8 @@ VIDEO_DIR = "tmp"
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
 # Figma OAuth Configuration
-FIGMA_CLIENT_ID = os.getenv('FIGMA_CLIENT_ID', 'JnmzWuEpo8leaFjBuNijvi')
-FIGMA_CLIENT_SECRET = os.getenv('FIGMA_CLIENT_SECRET', 'sbOTWwQccDNrCz3L7sVcI8LQQvFWwP')
+FIGMA_CLIENT_ID = os.getenv('FIGMA_CLIENT_ID')
+FIGMA_CLIENT_SECRET = os.getenv('FIGMA_CLIENT_SECRET')
 FIGMA_REDIRECT_URI = os.getenv('FIGMA_REDIRECT_URI', 'https://api-mg.onrender.com/callback')
 
 
@@ -593,7 +596,7 @@ def call_mistral_model(prompt):
         url = "https://api.mistral.ai/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": "Bearer jb0XySiEnvm0r7R3HwSAWvp0aIi80K1v"
+            "Authorization": f"Bearer {MISTRAL_KEY}"
         }
         data = {
             "model": "mistral-medium-latest",
