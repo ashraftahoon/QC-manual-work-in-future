@@ -745,14 +745,15 @@ def poll_import_job_status(job_id, xray_token, max_attempts=30, delay_seconds=5)
                     # Handle different response structures
                     status = job_data.get('status') or job_data.get('state') or 'UNKNOWN'
                     message = job_data.get('message', '')
-                    errors = job_data.get('errors', [])
-                    
+                    result_block = job_data.get('result') or {}
+                    errors = job_data.get('errors') or result_block.get('errors') or []
+
                     logger.info(f"Job {job_id} status: {status}, message: {message}")
-                    
+
                     if status.upper() in ['COMPLETED', 'DONE', 'SUCCESSFUL']:
                         logger.info("✅ Xray import job completed successfully")
                         return True, job_data, None
-                    elif status.upper() in ['FAILED', 'ERROR']:
+                    elif status.upper() in ['FAILED', 'ERROR', 'UNSUCCESSFUL']:
                         error_details = errors if errors else message
                         error_msg = f"Import failed: {error_details}"
                         logger.error(f"❌ Xray import job failed: {error_msg}")
