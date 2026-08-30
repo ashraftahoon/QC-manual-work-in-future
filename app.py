@@ -723,8 +723,9 @@ def poll_import_job_status(job_id, xray_token, max_attempts=30, delay_seconds=5)
         "Content-Type": "application/json"
     }
     
-    # Try multiple possible endpoints for Xray Cloud
+    # Xray Cloud's documented bulk import status endpoint (v1/no-suffix variants below 404)
     endpoints = [
+        f"{XRAY_CLOUD_BASE_URL}/api/v2/import/test/bulk/{job_id}/status",
         f"{XRAY_CLOUD_BASE_URL}/api/v2/import/test/bulk/{job_id}",
         f"{XRAY_CLOUD_BASE_URL}/api/v1/import/test/bulk/{job_id}/status",
     ]
