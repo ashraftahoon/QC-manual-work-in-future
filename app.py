@@ -596,7 +596,7 @@ def call_mistral_model(prompt):
             "Authorization": "Bearer jb0XySiEnvm0r7R3HwSAWvp0aIi80K1v"
         }
         data = {
-            "model": "mistral-large-2512",
+            "model": "mistral-medium-latest",
             "messages": [{"role": "user", "content": prompt}]
         }
         response = requests.post(url, headers=headers, json=data)
