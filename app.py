@@ -72,6 +72,11 @@ MCP_URL       = "https://playwright-mcp-s8mf.onrender.com/sse"
 MISTRAL_KEY   = os.getenv('MISTRAL_API_KEY')
 MISTRAL_MODEL = "codestral-latest"
 
+# Groq (OpenAI-compatible) - used for text-generation features while Mistral's
+# account rate limit is stuck at 0 req/min
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+GROQ_MODEL   = "openai/gpt-oss-120b"
+
 MAX_TOOL_RESULT_CHARS = 3000   # truncate huge snapshots to save tokens
 
 
@@ -591,14 +596,14 @@ def start_playwright_run(spec_path):
 def download_file(filename):
     return send_from_directory("/tmp", filename, as_attachment=True)
 
-def call_mistral_model(prompt, max_retries=4):
-    url = "https://api.mistral.ai/v1/chat/completions"
+def call_llm_model(prompt, max_retries=4):
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {MISTRAL_KEY}"
+        "Authorization": f"Bearer {GROQ_API_KEY}"
     }
     data = {
-        "model": "mistral-medium-latest",
+        "model": GROQ_MODEL,
         "messages": [{"role": "user", "content": prompt}]
     }
     try:
@@ -606,7 +611,7 @@ def call_mistral_model(prompt, max_retries=4):
             response = requests.post(url, headers=headers, json=data)
             if response.status_code == 429:
                 wait = 2 ** attempt
-                logger.warning(f"Mistral rate limited - retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"Groq rate limited - retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
             response.raise_for_status()
@@ -614,10 +619,10 @@ def call_mistral_model(prompt, max_retries=4):
             if resp_json.get("choices"):
                 return resp_json["choices"][0]["message"]["content"].strip()
             else:
-                raise Exception("Error calling Mistral model: No response received")
-        raise Exception("Mistral rate limit exceeded after retries")
+                raise Exception("Error calling LLM: No response received")
+        raise Exception("Groq rate limit exceeded after retries")
     except Exception as e:
-        logger.error(f"Mistral API error: {str(e)}")
+        logger.error(f"Groq API error: {str(e)}")
         raise
 
 def extract_sections_from_template(template_path):
@@ -641,7 +646,7 @@ def fill_sections_with_scope(sections, job_scope):
     for section, description in sections.items():
         if description.strip():
             prompt = f"Based on the job scope: {job_scope}, fill the section '{section}' with relevant content. Description: {description.strip()}"
-            filled_sections[section] = call_mistral_model(prompt)
+            filled_sections[section] = call_llm_model(prompt)
         else:
             filled_sections[section] = "No description provided."
     return filled_sections
@@ -2639,7 +2644,7 @@ def execute_mcb_workflow():
                     "Use a single describe block and a single test that implements the workflow. Respond with code only.\n\n"
                     f"Workflow description:\n{description}"
                 )
-                code = call_mistral_model(code_prompt)
+                code = call_llm_model(code_prompt)
             except Exception as e:
                 logger.error(f"Error generating Playwright code in mock MCB: {str(e)}")
                 return jsonify({"success": False, "error": "Failed to generate Playwright test"}), 500
@@ -2713,7 +2718,7 @@ def generate_playwright_test():
                 "Respond with code only.\n\n"
                 f"Request:\n{description}"
             )
-            code = call_mistral_model(code_prompt)
+            code = call_llm_model(code_prompt)
             filename = f"playwright_test_{uuid.uuid4().hex[:8]}.spec.ts"
             output_path = os.path.join("/tmp", filename)
             try:
@@ -2848,7 +2853,7 @@ Instructions:
 
 Provide the result now:"""
 
-        result = call_mistral_model(prompt)
+        result = call_llm_model(prompt)
         return jsonify({"result": result})
 
     except Exception as e:
@@ -2865,7 +2870,7 @@ def generate_test_cases():
             return jsonify({"error": "user_story is required"}), 400
 
         prompt = f"{user_story}, from the given user story create a table of test cases (Test Case ID, Description (starts with validate that....), Steps, Expected Behavior) with corner cases, give me the table only"
-        result = call_mistral_model(prompt)
+        result = call_llm_model(prompt)
         
         logger.info("Test cases generated successfully")
         return jsonify({"message": "Test Cases generated", "output": result})
@@ -2918,7 +2923,7 @@ def review_test_cases():
     ,
     Create a table with the analysis factor name, Complies (Yes/No), and comments (if Complies is No, with a reference to test cases (e.g., test case id)), then Givve me the table only.
     """
-    result = call_mistral_model(prompt)
+    result = call_llm_model(prompt)
     print(result)
     print({"message": "Test Cases Reviewed", "output": result})
     return jsonify({"message": "Test Cases Reviewed", "output": result})
@@ -2933,7 +2938,7 @@ def generate_bug_report():
             return jsonify({"error": "bugs is required"}), 400
 
         prompt = f"{bugs}, from the given bugs, create a bug report as a table with all attributes (Bug ID,Description,Steps to Reproduce,Expected Behavior,Actual Behavior,Priority,Severity,Status), give me the table only"
-        result = call_mistral_model(prompt)
+        result = call_llm_model(prompt)
         
         logger.info("Bug report generated successfully")
         return jsonify({"message": "Bug report generated", "output": result})
@@ -2972,7 +2977,7 @@ Now wait for my input and generate the table accordingly.
 
 input description: {input_text}"""
         
-        result = call_mistral_model(prompt)
+        result = call_llm_model(prompt)
         logger.info("Dummy data generated successfully")
         return jsonify({"message": "Dummy data generated", "output": result})
         
@@ -2993,7 +2998,7 @@ def analyse_requirements():
             From the given user stories/requirements, 
             Create a table of comprehensive analysis for the given requirements/user stories, including only (#, Comments/Questions/Gaps (e.g. comprehensive questions if there are any ambiguous), Answers/Assumptions), 
             Give me the created table only"""
-    result = call_mistral_model(prompt)
+    result = call_llm_model(prompt)
     print(result)
     print({"message": "Requirement Analysis generated", "output": result})
     return jsonify({"message": "Requirement Analysis generated", "output": result})
@@ -3011,7 +3016,7 @@ def generate_hls():
             From the given user stories/requirements, 
             Create a table of comprehensive high-level scenarios that analyse the given requirements/user stories (User Story ID, User Story Name, Scenario ID, Module, Scenario Priority, Scenario Description), 
             Give me the created table only"""
-    result = call_mistral_model(prompt)
+    result = call_llm_model(prompt)
     print(result)
     print({"message": "High Level Scenarios generated", "output": result})
     return jsonify({"message": "High Level Scenarios generated", "output": result})
@@ -3093,7 +3098,7 @@ def generate_data_quality_tests():
     SELECT ...
     """
 
-        result = call_mistral_model(prompt)
+        result = call_llm_model(prompt)
         logger.info("Data quality tests generated successfully")
         return jsonify({"message": "Data Quality Tests generated", "output": result})
         
@@ -3147,7 +3152,7 @@ Expected Result: {test_case.get('expected_result', 'N/A')}
 User: {message}
 ConanAI:"""
         
-        reply = call_mistral_model(prompt)
+        reply = call_llm_model(prompt)
         return jsonify({"reply": reply})
 
     except Exception as e:
