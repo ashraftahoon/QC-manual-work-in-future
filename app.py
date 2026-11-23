@@ -591,24 +591,31 @@ def start_playwright_run(spec_path):
 def download_file(filename):
     return send_from_directory("/tmp", filename, as_attachment=True)
 
-def call_mistral_model(prompt):
+def call_mistral_model(prompt, max_retries=4):
+    url = "https://api.mistral.ai/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {MISTRAL_KEY}"
+    }
+    data = {
+        "model": "mistral-medium-latest",
+        "messages": [{"role": "user", "content": prompt}]
+    }
     try:
-        url = "https://api.mistral.ai/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {MISTRAL_KEY}"
-        }
-        data = {
-            "model": "mistral-medium-latest",
-            "messages": [{"role": "user", "content": prompt}]
-        }
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        resp_json = response.json()
-        if resp_json.get("choices"):
-            return resp_json["choices"][0]["message"]["content"].strip()
-        else:
-            raise Exception("Error calling Mistral model: No response received")
+        for attempt in range(max_retries):
+            response = requests.post(url, headers=headers, json=data)
+            if response.status_code == 429:
+                wait = 2 ** attempt
+                logger.warning(f"Mistral rate limited - retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            resp_json = response.json()
+            if resp_json.get("choices"):
+                return resp_json["choices"][0]["message"]["content"].strip()
+            else:
+                raise Exception("Error calling Mistral model: No response received")
+        raise Exception("Mistral rate limit exceeded after retries")
     except Exception as e:
         logger.error(f"Mistral API error: {str(e)}")
         raise
