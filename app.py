@@ -116,27 +116,33 @@ class DummyFunction:
         if not isinstance(self.arguments, str):
             self.arguments = json.dumps(self.arguments)
 
-def mistral_call_with_retry(api_key, base_url="https://api.mistral.ai/v1/chat/completions", **kwargs):
-    """Call an OpenAI-compatible chat/completions endpoint with exponential backoff on rate limit errors."""
+def mistral_call_with_retry(api_key, base_url="https://api.mistral.ai/v1/chat/completions", max_retries=6, **kwargs):
+    """Call an OpenAI-compatible chat/completions endpoint, honoring the provider's actual rate-limit reset time on 429s."""
     url = base_url
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
     }
-    for attempt in range(5):
+    for attempt in range(max_retries):
         try:
             resp = requests.post(url, headers=headers, json=kwargs)
             resp.raise_for_status()
             return DummyResponse(resp.json())
         except requests.exceptions.RequestException as e:
             if getattr(e.response, "status_code", None) == 429:
-                wait = 2 ** attempt
-                print(f"Rate limited — retrying in {wait}s...")
+                wait = (
+                    _parse_groq_reset_duration(e.response.headers.get("Retry-After"))
+                    or _parse_groq_reset_duration(e.response.headers.get("x-ratelimit-reset-tokens"))
+                    or _parse_groq_reset_duration(e.response.headers.get("x-ratelimit-reset-requests"))
+                    or (2 ** attempt)
+                )
+                wait = min(wait, 30) + 0.5
+                print(f"Rate limited — retrying in {wait:.1f}s...")
                 time.sleep(wait)
             else:
-                print(f"Mistral API error: {getattr(e.response, 'text', str(e))}")
+                print(f"API error: {getattr(e.response, 'text', str(e))}")
                 raise
-    raise RuntimeError("Mistral rate limit exceeded after retries.")
+    raise RuntimeError("Rate limit exceeded after retries.")
 
 
 
@@ -404,12 +410,30 @@ def execute_mistral():
     })
 
 
+EXECUTOR_SYSTEM_PROMPT = """You are a precise web UI test executor with access to Playwright MCP browser tools.
+
+Follow this workflow strictly:
+1. Call the navigate tool to go to the target URL.
+2. After every navigation or significant page change, call the snapshot tool to get element references (refs). ALWAYS act on refs from the most recent snapshot - refs from an older snapshot may be stale.
+3. Use the structured interaction tools (click, type, fill_form, select_option, etc.) with those refs to interact with the page. Do NOT write custom code-execution/page.evaluate scripts for standard navigation, filling forms, or clicking - only fall back to raw code execution if no structured tool can accomplish a specific verification step.
+4. After any action that triggers navigation or an async page change (submitting a form, clicking a login/submit button, etc.), use the wait_for tool to wait for the expected result text (or a short timeout) BEFORE checking the outcome. Checking immediately after such a click is a common cause of false failures - the page may not have finished loading yet.
+5. After waiting, take a final snapshot or screenshot and check it against the expected result.
+6. As soon as you have enough evidence to reach a conclusion, STOP calling tools immediately - do not make extra verification calls "just in case". Reply with plain text in EXACTLY this format, nothing else:
+{FINAL_STATUS: Passed|Failed|Blocked, STEPS: <concise step-by-step summary of what you did and observed>}
+
+Use "Blocked" only when the test cannot be completed due to an environment/tooling problem (e.g. page won't load, a required element never appears). Use "Failed" when you completed the steps but the actual outcome did not match the expected result. Use "Passed" when the actual outcome matched the expected result."""
+
+
 async def run_qwen_agent(messages):
     # Previously called a Qwen model over an ngrok tunnel to a since-departed
     # teammate's machine; that tunnel is permanently offline. Reuses the same
-    # Groq backend as the rest of the app (OpenAI-compatible tool calling).
-    import json
+    # Groq backend as the rest of the app (OpenAI-compatible tool calling),
+    # with a proper multi-turn conversation instead of re-dumping the whole
+    # history as text into one user message every turn.
     steps = []
+    conversation = list(messages)
+    if not conversation or conversation[0].get("role") != "system":
+        conversation.insert(0, {"role": "system", "content": EXECUTOR_SYSTEM_PROMPT})
 
     async with sse_client(MCP_URL) as (read, write):
         async with ClientSession(read, write) as session:
@@ -429,24 +453,13 @@ async def run_qwen_agent(messages):
                 for t in mcp_tools.tools
             ]
 
-            for _ in range(10):
-                current_instruction = messages[0]["content"]
-
-                if steps:
-                    current_instruction += "\n\n--- EXECUTION HISTORY SO FAR ---\n"
-                    for step in steps:
-                        current_instruction += f"\nYou executed tool '{step['name']}' with arguments: {json.dumps(step['args'])}\n"
-                        current_instruction += f"The tool returned:\n{step['result'].strip()[:800]}\n"
-                    current_instruction += "\nObserve the history above and continue from where you left off. If you have completed the test case, do not call any more tools, and output your final conclusion exactly as instructed."
-
-                one_prompt_messages = [{"role": "user", "content": current_instruction}]
-
+            for _ in range(20):
                 try:
                     response = mistral_call_with_retry(
                         GROQ_API_KEY,
                         base_url="https://api.groq.com/openai/v1/chat/completions",
                         model=GROQ_MODEL,
-                        messages=one_prompt_messages,
+                        messages=conversation,
                         tools=tools,
                         tool_choice="auto",
                     )
@@ -460,6 +473,22 @@ async def run_qwen_agent(messages):
                 if not tool_calls:
                     content = msg.content or ""
                     return content, steps
+
+                conversation.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                })
 
                 for tc in tool_calls:
                     tc_name = tc.function.name
@@ -489,7 +518,14 @@ async def run_qwen_agent(messages):
                         "screenshot": screenshot_b64,
                     })
 
-            return "Max turns reached.", steps
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc_name,
+                        "content": result_text,
+                    })
+
+            return "{FINAL_STATUS: Blocked, STEPS: Agent reached the maximum number of tool-call turns without a final conclusion.}", steps
 
 
 @app.post("/execute_qwen")
