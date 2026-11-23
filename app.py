@@ -116,9 +116,9 @@ class DummyFunction:
         if not isinstance(self.arguments, str):
             self.arguments = json.dumps(self.arguments)
 
-def mistral_call_with_retry(api_key, **kwargs):
-    """Call Mistral with exponential backoff on rate limit errors."""
-    url = "https://api.mistral.ai/v1/chat/completions"
+def mistral_call_with_retry(api_key, base_url="https://api.mistral.ai/v1/chat/completions", **kwargs):
+    """Call an OpenAI-compatible chat/completions endpoint with exponential backoff on rate limit errors."""
+    url = base_url
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
@@ -301,7 +301,7 @@ async def run_agent(messages):
                     "function": {
                         "name": t.name,
                         "description": t.description or "",
-                        "parameters": t.inputSchema or {},
+                        "parameters": t.input_schema or {},
                     },
                 }
                 for t in mcp_tools.tools
@@ -405,7 +405,9 @@ def execute_mistral():
 
 
 async def run_qwen_agent(messages):
-    import aiohttp
+    # Previously called a Qwen model over an ngrok tunnel to a since-departed
+    # teammate's machine; that tunnel is permanently offline. Reuses the same
+    # Groq backend as the rest of the app (OpenAI-compatible tool calling).
     import json
     steps = []
 
@@ -421,85 +423,73 @@ async def run_qwen_agent(messages):
                     "function": {
                         "name": t.name,
                         "description": t.description or "",
-                        "parameters": t.inputSchema or {},
+                        "parameters": t.input_schema or {},
                     },
                 }
                 for t in mcp_tools.tools
             ]
 
-            headers = {
-                "Content-Type": "application/json",
-                "ngrok-skip-browser-warning": "true"
-            }
-            url = "https://devalue-unfounded-venture.ngrok-free.dev/api/chat"
-            
-            async with aiohttp.ClientSession() as http_session:
-                for _ in range(10):
-                    current_instruction = messages[0]["content"]
-                    
-                    if steps:
-                        current_instruction += "\n\n--- EXECUTION HISTORY SO FAR ---\n"
-                        for step in steps:
-                            current_instruction += f"\nYou executed tool '{step['name']}' with arguments: {json.dumps(step['args'])}\n"
-                            current_instruction += f"The tool returned:\n{step['result'].strip()[:800]}\n"
-                        current_instruction += "\nObserve the history above and continue from where you left off. If you have completed the test case, do not call any more tools, and output your final conclusion exactly as instructed."
-                        
-                    one_prompt_messages = [{"role": "user", "content": current_instruction}]
+            for _ in range(10):
+                current_instruction = messages[0]["content"]
 
-                    payload = {
-                        "model": "qwen3.5:4b",
-                        "stream": False,
-                        "messages": one_prompt_messages,
-                        "tools": tools,
-                    }
+                if steps:
+                    current_instruction += "\n\n--- EXECUTION HISTORY SO FAR ---\n"
+                    for step in steps:
+                        current_instruction += f"\nYou executed tool '{step['name']}' with arguments: {json.dumps(step['args'])}\n"
+                        current_instruction += f"The tool returned:\n{step['result'].strip()[:800]}\n"
+                    current_instruction += "\nObserve the history above and continue from where you left off. If you have completed the test case, do not call any more tools, and output your final conclusion exactly as instructed."
+
+                one_prompt_messages = [{"role": "user", "content": current_instruction}]
+
+                try:
+                    response = mistral_call_with_retry(
+                        GROQ_API_KEY,
+                        base_url="https://api.groq.com/openai/v1/chat/completions",
+                        model=GROQ_MODEL,
+                        messages=one_prompt_messages,
+                        tools=tools,
+                        tool_choice="auto",
+                    )
+                except Exception as e:
+                    print(f"Failed to reach Groq endpoint: {e}")
+                    return f"API Error: {str(e)}", steps
+
+                msg = response.choices[0].message
+                tool_calls = msg.tool_calls
+
+                if not tool_calls:
+                    content = msg.content or ""
+                    return content, steps
+
+                for tc in tool_calls:
+                    tc_name = tc.function.name
+                    tc_args = tc.function.arguments
+                    args = json.loads(tc_args) if isinstance(tc_args, str) else tc_args
+
                     try:
-                        async with http_session.post(url, json=payload, headers=headers) as resp:
-                            if resp.status != 200:
-                                err_txt = await resp.text()
-                                raise RuntimeError(f"Qwen API error {resp.status}: {err_txt}")
-                            
-                            data = await resp.json()
+                        result = await session.call_tool(tc_name, args)
+                        result_text = "\n".join(
+                            b.text if hasattr(b, "text") else str(b)
+                            for b in result.content
+                        )
                     except Exception as e:
-                        print(f"Failed to reach Qwen endpoint: {e}")
-                        return f"API Error: {str(e)}", steps
+                        print(f"[run_qwen_agent] Tool execution failed: {e}")
+                        result_text = f"Tool Error: {str(e)}"
 
-                    msg = data.get("message", {})
-                    tool_calls = msg.get("tool_calls", [])
+                    if len(result_text) > MAX_TOOL_RESULT_CHARS:
+                        result_text = result_text[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
 
-                    if not tool_calls:
-                        content = msg.get("content") or ""
-                        return content, steps
+                    screenshot_b64 = await take_screenshot(session, len(steps) + 1)
 
-                    for tc in tool_calls:
-                        tc_func = tc.get("function", {})
-                        tc_name = tc_func.get("name")
-                        tc_args = tc_func.get("arguments", "{}")
-                        args = json.loads(tc_args) if isinstance(tc_args, str) else tc_args
-                        
-                        try:
-                            result = await session.call_tool(tc_name, args)
-                            result_text = "\n".join(
-                                b.text if hasattr(b, "text") else str(b)
-                                for b in result.content
-                            )
-                        except Exception as e:
-                            print(f"[run_qwen_agent] Tool execution failed: {e}")
-                            result_text = f"Tool Error: {str(e)}"
+                    steps.append({
+                        "step_num": len(steps) + 1,
+                        "name": tc_name,
+                        "args": args,
+                        "result": result_text,
+                        "screenshot": screenshot_b64,
+                    })
 
-                        if len(result_text) > MAX_TOOL_RESULT_CHARS:
-                            result_text = result_text[:MAX_TOOL_RESULT_CHARS] + "\n...[truncated]"
-
-                        screenshot_b64 = await take_screenshot(session, len(steps) + 1)
-                        
-                        steps.append({
-                            "step_num": len(steps) + 1,
-                            "name": tc_name,
-                            "args": args,
-                            "result": result_text,
-                            "screenshot": screenshot_b64,
-                        })
-
-                return "Max turns reached.", steps
+            return "Max turns reached.", steps
 
 
 @app.post("/execute_qwen")
