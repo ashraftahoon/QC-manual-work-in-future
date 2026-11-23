@@ -2704,6 +2704,9 @@
       function getTableContainer(tableType) {
         if (tableType === 'bugreport') return document.getElementById('bugreport-result');
         if (tableType === 'data') return document.getElementById('datagenerator-result');
+        if (tableType === 'analysisreq') return document.getElementById('req-analysis-result');
+        if (tableType === 'hls') return document.getElementById('req-scenario-result');
+        if (tableType === 'reviewcase') return document.getElementById('review-tests-result');
         return document.getElementById('testcase-result');
       }
 
@@ -2765,6 +2768,12 @@
               bugReportTableData[rowIndex + 1][cellIndex] = newValue;
             } else if (tableType === 'data') {
               dataTableData[rowIndex + 1][cellIndex] = newValue;
+            } else if (tableType === 'analysisreq') {
+              currentAnalysisTableData[rowIndex + 1][cellIndex] = newValue;
+            } else if (tableType === 'hls') {
+              currentHlsTableData[rowIndex + 1][cellIndex] = newValue;
+            } else if (tableType === 'reviewcase') {
+              currentReviewTableData[rowIndex + 1][cellIndex] = newValue;
             }
           }
         });
@@ -2783,6 +2792,22 @@
         } else if (tableType === 'bugreport') {
           bugReportTableData.splice(rowIndex + 1, 1);
           const { htmlTable } = markdownTableToHTMLFromData(bugReportTableData, 'bugreport');
+          container.innerHTML = htmlTable;
+        } else if (tableType === 'data') {
+          dataTableData.splice(rowIndex + 1, 1);
+          const { htmlTable } = markdownTableToHTMLFromData(dataTableData, 'data');
+          container.innerHTML = htmlTable;
+        } else if (tableType === 'analysisreq') {
+          currentAnalysisTableData.splice(rowIndex + 1, 1);
+          const { htmlTable } = markdownTableToHTMLFromData(currentAnalysisTableData, 'analysisreq');
+          container.innerHTML = htmlTable;
+        } else if (tableType === 'hls') {
+          currentHlsTableData.splice(rowIndex + 1, 1);
+          const { htmlTable } = markdownTableToHTMLFromData(currentHlsTableData, 'hls');
+          container.innerHTML = htmlTable;
+        } else if (tableType === 'reviewcase') {
+          currentReviewTableData.splice(rowIndex + 1, 1);
+          const { htmlTable } = markdownTableToHTMLFromData(currentReviewTableData, 'reviewcase');
           container.innerHTML = htmlTable;
         }
       }
