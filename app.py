@@ -670,12 +670,50 @@ def extract_sections_from_template(template_path):
 
 def fill_sections_with_scope(sections, job_scope):
     filled_sections = {}
-    for section, description in sections.items():
-        if description.strip():
-            prompt = f"Based on the job scope: {job_scope}, fill the section '{section}' with relevant content. Description: {description.strip()}"
-            filled_sections[section] = call_llm_model(prompt)
-        else:
+    to_generate = {s: d.strip() for s, d in sections.items() if d.strip()}
+    for section in sections:
+        if section not in to_generate:
             filled_sections[section] = "No description provided."
+
+    if not to_generate:
+        return filled_sections
+
+    # Batch all sections into one call instead of one call per section - with
+    # ~20+ sections and Groq's free-tier per-minute token limit, one call per
+    # section means dozens of rate-limited round trips (minutes of latency).
+    section_list = "\n".join(
+        f"{i+1}. Title: {title}\n   Description: {desc}"
+        for i, (title, desc) in enumerate(to_generate.items())
+    )
+    batch_prompt = (
+        f"Based on the job scope: {job_scope}, write content for each of the following "
+        f"test plan sections. Respond with EXACTLY one block per section, no extra "
+        f"commentary before/after, using this format:\n\n"
+        f"###SECTION: <exact section title>###\n<content>\n\n"
+        f"Sections to fill:\n{section_list}"
+    )
+
+    try:
+        batch_response = call_llm_model(batch_prompt)
+        matches = re.findall(
+            r'###SECTION:\s*(.*?)\s*###\s*(.*?)(?=###SECTION:|\Z)',
+            batch_response,
+            re.DOTALL
+        )
+        parsed = {title.strip(): content.strip() for title, content in matches}
+    except Exception as e:
+        logger.error(f"Batch section generation failed: {str(e)}")
+        parsed = {}
+
+    # Fall back to per-section calls only for anything the batch call missed
+    for title, desc in to_generate.items():
+        if title in parsed and parsed[title]:
+            filled_sections[title] = parsed[title]
+        else:
+            logger.warning(f"Section '{title}' missing from batch response, generating individually")
+            prompt = f"Based on the job scope: {job_scope}, fill the section '{title}' with relevant content. Description: {desc}"
+            filled_sections[title] = call_llm_model(prompt)
+
     return filled_sections
 
 def insert_markdown(paragraph, markdown_text):
