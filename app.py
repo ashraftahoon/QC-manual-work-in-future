@@ -596,7 +596,28 @@ def start_playwright_run(spec_path):
 def download_file(filename):
     return send_from_directory("/tmp", filename, as_attachment=True)
 
-def call_llm_model(prompt, max_retries=4):
+def _parse_groq_reset_duration(value):
+    """Parse Groq's reset-time header format (e.g. '2.782s', '1m30s', '100ms') into seconds."""
+    if not value:
+        return None
+    try:
+        total = 0.0
+        for num, unit in re.findall(r'(\d+\.?\d*)(ms|h|m|s)', value):
+            n = float(num)
+            if unit == 'ms':
+                total += n / 1000
+            elif unit == 's':
+                total += n
+            elif unit == 'm':
+                total += n * 60
+            elif unit == 'h':
+                total += n * 3600
+        return total if total > 0 else None
+    except Exception:
+        return None
+
+
+def call_llm_model(prompt, max_retries=6):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -610,8 +631,14 @@ def call_llm_model(prompt, max_retries=4):
         for attempt in range(max_retries):
             response = requests.post(url, headers=headers, json=data)
             if response.status_code == 429:
-                wait = 2 ** attempt
-                logger.warning(f"Groq rate limited - retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                wait = (
+                    _parse_groq_reset_duration(response.headers.get("Retry-After"))
+                    or _parse_groq_reset_duration(response.headers.get("x-ratelimit-reset-tokens"))
+                    or _parse_groq_reset_duration(response.headers.get("x-ratelimit-reset-requests"))
+                    or (2 ** attempt)
+                )
+                wait = min(wait, 30) + 0.5
+                logger.warning(f"Groq rate limited - retrying in {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
                 time.sleep(wait)
                 continue
             response.raise_for_status()
